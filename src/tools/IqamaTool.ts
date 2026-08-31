@@ -10,7 +10,7 @@ import { LuaTool } from 'lua-cli';
 import { z } from 'zod';
 
 import { checkIqama } from '../domain/iqama';
-import { resolveEmployee } from './shared';
+import { resolveSubject } from './shared';
 
 export class CheckIqamaExpiryTool implements LuaTool {
   name = 'check_iqama_expiry';
@@ -18,11 +18,11 @@ export class CheckIqamaExpiryTool implements LuaTool {
     'Check when a Saudi-based employee’s Iqama expires and how urgent renewal is';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_entitlements');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;

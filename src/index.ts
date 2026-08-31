@@ -19,12 +19,55 @@ import { CheckIqamaExpiryTool } from './tools/IqamaTool';
 import { SearchPoliciesTool } from './tools/PolicyTools';
 import { StartOnboardingTool } from './tools/OnboardingTools';
 import { SeedPoliciesTool } from './tools/SeedPoliciesTool';
+import { GetTeamSummaryTool, SubmitDailyCheckinTool } from './tools/PerformanceTools';
+import { CheckRequestStatusTool, SubmitSopRequestTool, UpdateRequestStatusTool } from './tools/SopRequestTools';
+import { VerifyIdentityTool, WhoAmITool } from './tools/IdentityTools';
 
 import { sweepIqamaExpiry } from './domain/iqama';
+
+/**
+ * Runtime execution metadata for a job.
+ *
+ * The platform supplies `job.execution` — occurrenceId is stable across
+ * retries, which is what makes it usable as an idempotency key. lua-cli 3.29
+ * does not declare it on JobInstance yet, so it is read through a narrow cast
+ * rather than by loosening the job signature. It is absent in local `lua test`
+ * runs, hence the optional access at every call site.
+ */
+type JobExecution = { occurrenceId?: string; executionId?: string; attempt?: number };
+
+function executionOf(job: unknown): JobExecution | undefined {
+  return (job as { execution?: JobExecution })?.execution;
+}
 import { getDirectory } from './integrations/bamboo';
 import { logIqamaAlert } from './integrations/sheets';
 
 /* --------------------------------------------------------------- skills */
+
+const identitySkill = new LuaSkill({
+  name: 'hr-identity',
+  description: 'Confirming which employee the agent is talking to',
+  context: `
+    Nothing else works until this does. Every tool that reads a personnel
+    record resolves the employee from their verified account, not from the
+    conversation, and refuses outright until identity is established.
+
+    - verify_my_identity: call with NO arguments first. It usually recognises
+      the number or work email the message arrived on. If it cannot, it returns
+      the exact questions to ask.
+    - whoami: what you currently know about them, and what they may do.
+
+    Guidelines:
+    - If any tool returns identity_not_verified, call verify_my_identity, then
+      retry what they originally asked for. Do not make them repeat themselves.
+    - When verification fails, never say which part was wrong, and never
+      confirm whether an employee ID exists. Offer one more attempt, then HR.
+    - Once verified, do not ask again. It persists across conversations.
+    - Only use startOver when the employee tells you that you have the wrong
+      person. Never to work around a refusal.
+  `,
+  tools: [new VerifyIdentityTool(), new WhoAmITool()],
+});
 
 const onboardingSkill = new LuaSkill({
   name: 'hr-onboarding',
@@ -100,6 +143,63 @@ const complianceSkill = new LuaSkill({
  * reason to reach for it mid-conversation — it is here to be invoked from
  * `lua test`, not to serve an employee.
  */
+const requestsSkill = new LuaSkill({
+  name: 'hr-requests',
+  description: 'HR service requests — submitting them and tracking them',
+  context: `
+    Use this skill when an employee wants to REQUEST something, as opposed to
+    asking what the policy says. "What is the transfer policy?" is
+    search_policies. "I want to transfer to the Jeddah plant" is this skill.
+
+    - submit_sop_request: raise a request. Salary certificates, employment
+      letters, transfers, exit and re-entry visas, Iqama renewals, housing
+      allowance advances, or general requests.
+    - check_request_status: where a request got to, by reference number or by
+      employee.
+
+    Guidelines:
+    - Different request types need different details. If the tool comes back
+      with missing_details, it tells you exactly what to ask for in both
+      languages. Ask, then call it again. Never invent a value to get past it.
+    - Some requests are country-specific. Exit and re-entry visas and Iqama
+      renewals are Saudi Arabia only, and the tool will refuse elsewhere and
+      offer what IS available. Relay that rather than apologising vaguely.
+    - Always give the employee their reference number and due date. The due
+      date already counts working days on a Sunday-to-Thursday week.
+    - If a request is overdue, say so plainly and escalate. Do not ask the
+      employee to keep waiting.
+  `,
+  tools: [new SubmitSopRequestTool(), new CheckRequestStatusTool(), new UpdateRequestStatusTool()],
+});
+
+const performanceSkill = new LuaSkill({
+  name: 'hr-performance',
+  description: 'Daily team check-ins and weekly performance summaries',
+  context: `
+    Use this skill for team leads reporting on their day, and for anyone asking
+    how a team has been performing.
+
+    - submit_daily_checkin: what the team accomplished, blockers, and a 1-5
+      productivity rating per team member.
+    - get_team_summary: averages, trends, blockers and reporting rate over a
+      period. This answers questions like "how did Ahmad's team perform this
+      week?".
+
+    Guidelines:
+    - Ratings run 1 to 5. If a lead gives something outside that, or rates the
+      same person twice, the tool refuses and tells you why.
+    - A second check-in on the same day REPLACES the first. Leads correct
+      themselves; that is expected, not an error.
+    - When no check-ins exist for a period, say so. Silence is a reporting gap,
+      never evidence of a bad week — do not infer performance from missing data.
+    - These are one lead's judgement across a handful of days. Present a low
+      average as something worth a conversation, not as a verdict on someone.
+      Never speculate about why a rating is low.
+    - Only discuss a team's performance with that team's lead or with HR.
+  `,
+  tools: [new SubmitDailyCheckinTool(), new GetTeamSummaryTool()],
+});
+
 const setupSkill = new LuaSkill({
   name: 'hr-setup',
   description: 'One-off administrative setup. Not for use during conversations.',
@@ -142,7 +242,7 @@ const iqamaSweep = new LuaJob({
 
       // Jobs run at least once, so guard the sheet writes on the occurrence id
       // rather than re-logging the same alerts on every retry.
-      const occurrenceId = job.execution?.occurrenceId;
+      const occurrenceId = executionOf(job)?.occurrenceId;
 
       for (const alert of alerts) {
         await logIqamaAlert({
@@ -165,7 +265,7 @@ const iqamaSweep = new LuaJob({
           .map((a) => `• ${a.displayName ?? a.employeeId} — ${a.daysRemaining} days (${a.severity})`);
 
         const user = await User.get(hrUserId);
-        await user.send([{
+        await user?.send([{
           type: 'text',
           text:
             `Iqama renewals — ${alerts.length} need attention` +
@@ -192,6 +292,60 @@ const iqamaSweep = new LuaJob({
 });
 
 /* ---------------------------------------------------------------- agent */
+
+/**
+ * End-of-day nudge to team leads who have not filed a check-in.
+ *
+ * Daily performance reporting fails on collection, not on analysis — a
+ * dashboard nobody feeds is worse than no dashboard, because it looks
+ * authoritative while being empty.
+ */
+const checkinReminder = new LuaJob({
+  name: 'daily-checkin-reminder',
+  description: 'Nudges team leads at the end of the working day to file their check-in',
+
+  schedule: {
+    type: 'cron',
+    expression: '0 16 * * 0-4', // 16:00 Sunday to Thursday
+    timezone: 'Asia/Riyadh',
+  },
+
+  metadata: {
+    // Team leads to nudge, as Lua user IDs. Populated after first deploy.
+    teamLeadUserIds: [] as string[],
+  },
+
+  timeout: 120,
+  retry: { maxAttempts: 2, backoffSeconds: 120 },
+
+  execute: async (job) => {
+    try {
+      const leadIds: string[] = job.metadata?.teamLeadUserIds ?? [];
+      if (!leadIds.length) {
+        return { success: true, skipped: 'no team leads configured' };
+      }
+
+      const todayIso = new Date().toISOString().slice(0, 10);
+      let sent = 0;
+
+      for (const userId of leadIds) {
+        const user = await User.get(userId);
+        await user?.send([{
+          type: 'text',
+          text:
+            `End of day — have you filed your team check-in for ${todayIso}?\n\n` +
+            'Reply with what your team got done, anything blocking them, and a ' +
+            '1-5 rating for each member.',
+        }]);
+        sent += 1;
+      }
+
+      return { success: true, sent, date: todayIso, occurrenceId: executionOf(job)?.occurrenceId };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'unknown error' };
+    }
+  },
+});
 
 export const agent = new LuaAgent({
   name: 'hr-operations-assistant',
@@ -227,10 +381,26 @@ Tools return a structured refusal with a detail and an action rather than
 throwing. Read the detail to the employee in their language and follow the
 action. A refusal is information, not a failure to hide.
 
+IDENTITY COMES FIRST
+You do not know who you are talking to until verify_my_identity says so. It
+usually recognises them from the number or work email the message arrived on,
+so this is normally invisible. If any tool returns identity_not_verified, run
+verification and then retry what they asked for.
+
+Never ask an employee for their employee ID in order to look up their own
+record. Their identity comes from their verified account, not from what they
+type — asking implies you would act on the answer, and you would not.
+
 CONFIDENTIALITY
-Only discuss an employee's own record with them. If someone asks about a
-colleague's salary, leave or documents, decline and point them to HR — unless
-they are that person's line manager asking about an approval they own.
+The tools enforce this; you do not have to police it, and you must not try to
+work around it. An employee reaches their own record. A line manager reaches
+their reports' records, but not their pay, balances or end-of-service. HR
+reaches anyone.
+
+When a tool refuses on access grounds, say plainly that this is not something
+you can share and point them to HR. Do not summarise, characterise, hint at or
+speculate about the withheld information — you have not been shown it, and
+guessing would defeat the refusal.
 
 ESCALATION
 Escalate to HR for: disputes, disciplinary matters, anything involving
@@ -241,8 +411,16 @@ TONE
 Warm, direct, and brief. Field workers are often reading on a phone between
 shifts — lead with the answer, then the detail.`,
 
-  skills: [onboardingSkill, leaveSkill, complianceSkill, setupSkill],
-  jobs: [iqamaSweep],
+  skills: [
+    identitySkill,
+    onboardingSkill,
+    leaveSkill,
+    complianceSkill,
+    requestsSkill,
+    performanceSkill,
+    setupSkill,
+  ],
+  jobs: [iqamaSweep, checkinReminder],
 });
 
 export default agent;

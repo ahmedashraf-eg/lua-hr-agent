@@ -12,7 +12,7 @@ import { z } from 'zod';
 
 import type { CountryCode } from '../domain/countryRules';
 import { daysBetween } from '../domain/tenure';
-import { resolveEmployee } from './shared';
+import { resolveSubject } from './shared';
 
 interface DocumentRequirement {
   id: string;
@@ -73,11 +73,11 @@ export class StartOnboardingTool implements LuaTool {
     'Begin onboarding for a new hire: list the documents they must provide, their probation terms, and their orientation schedule';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID of the new hire'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_record');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;

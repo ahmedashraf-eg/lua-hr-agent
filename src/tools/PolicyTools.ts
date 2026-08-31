@@ -7,8 +7,25 @@
  * worse than one that admits it does not know.
  */
 
-import { Data, LuaTool, type DataEntry } from 'lua-cli';
+import { Data, LuaTool } from 'lua-cli';
 import { z } from 'zod';
+
+/**
+ * A search hit. `Data.search` returns DataEntryInstance objects that proxy
+ * stored fields onto the instance, so `entry.title` and `entry.score` both
+ * resolve. lua-cli 3.29 does not export a type for this, so it is declared
+ * locally rather than importing something that is not there.
+ */
+interface PolicyHit {
+  id: string;
+  score?: number;
+  policyId?: string;
+  title?: string;
+  titleAr?: string;
+  content?: string;
+  category?: string;
+  lastReviewed?: string;
+}
 
 import { logPolicyGap } from '../integrations/sheets';
 import { currentChannel } from './shared';
@@ -36,7 +53,7 @@ export class SearchPoliciesTool implements LuaTool {
   async execute(input: z.infer<typeof this.inputSchema>) {
     const query = input.country ? `${input.query} (${input.country})` : input.query;
 
-    let results: DataEntry[] = [];
+    let results: PolicyHit[] = [];
 
     try {
       results = await Data.search(COLLECTION, query, 5, MATCH_THRESHOLD);

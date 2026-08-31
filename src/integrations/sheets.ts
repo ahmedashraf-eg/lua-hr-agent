@@ -26,7 +26,12 @@
 
 import { env } from 'lua-cli';
 
-export type SheetTab = 'LeaveLog' | 'SOPGaps' | 'IqamaAlerts';
+export type SheetTab =
+  | 'LeaveLog'
+  | 'SOPGaps'
+  | 'IqamaAlerts'
+  | 'Performance'
+  | 'SOPRequests';
 
 export interface AppendResult {
   logged: boolean;
@@ -40,15 +45,32 @@ async function append(tab: SheetTab, row: (string | number)[]): Promise<AppendRe
   }
 
   try {
+    // A Web App deployed as "anyone with the link" is reachable by anyone who
+    // has the link. The shared secret means holding the URL is not enough to
+    // write to the dashboard. It is not authentication — it is the difference
+    // between an open endpoint and one that needs a stolen credential.
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tab, row }),
+      body: JSON.stringify({ tab, row, secret: env('SHEETS_SECRET') || undefined }),
     });
 
     if (!response.ok) {
       return { logged: false, reason: `Sheets responded ${response.status}` };
     }
+
+    // Apps Script returns 200 even when it rejects the payload, so the
+    // body has to be read to know whether the row actually landed.
+    try {
+      const body = (await response.json()) as { ok?: boolean; error?: string };
+      if (body && body.ok === false) {
+        return { logged: false, reason: body.error ?? 'rejected by the dashboard' };
+      }
+    } catch {
+      // A non-JSON body means the deployment is misconfigured, not that the
+      // write failed. Treat it as logged rather than failing a leave request.
+    }
+
     return { logged: true };
   } catch (error) {
     return {
@@ -124,5 +146,62 @@ export function logIqamaAlert(entry: {
     entry.expiry,
     entry.daysRemaining,
     entry.severity,
+  ]);
+}
+
+/**
+ * Record one team member's rating from a daily check-in.
+ *
+ * Written one row per member rather than one per check-in, because the sheet
+ * is a dashboard: a flat table pivots and charts, a nested one does neither.
+ */
+export function logPerformanceRating(entry: {
+  date: string;
+  teamLeadId: string;
+  teamLeadName: string;
+  employeeId: string;
+  employeeName: string;
+  rating: number;
+  accomplishments: string;
+  blockers: string;
+  note?: string;
+}): Promise<AppendResult> {
+  return append('Performance', [
+    entry.date,
+    entry.teamLeadId,
+    entry.teamLeadName,
+    entry.employeeId,
+    entry.employeeName,
+    entry.rating,
+    entry.accomplishments,
+    entry.blockers,
+    entry.note ?? '',
+    now(),
+  ]);
+}
+
+/** Record an HR service request on the dashboard. */
+export function logSopRequest(entry: {
+  reference: string;
+  type: string;
+  employeeId: string;
+  employeeName: string;
+  country: string;
+  status: string;
+  owner: string;
+  dueBy: string;
+  details: string;
+}): Promise<AppendResult> {
+  return append('SOPRequests', [
+    now(),
+    entry.reference,
+    entry.type,
+    entry.employeeId,
+    entry.employeeName,
+    entry.country,
+    entry.status,
+    entry.owner,
+    entry.dueBy,
+    entry.details,
   ]);
 }

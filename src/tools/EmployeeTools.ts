@@ -7,18 +7,18 @@ import { z } from 'zod';
 
 import { validateProbation } from '../domain/countryRules';
 import { completedMonths, completedYears, daysBetween, tenureYears } from '../domain/tenure';
-import { resolveEmployee } from './shared';
+import { resolveSubject } from './shared';
 
 export class GetEmployeeTool implements LuaTool {
   name = 'get_employee';
   description = 'Look up an employee record, including country, tenure and job details';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_record');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;
@@ -53,7 +53,7 @@ export class CheckProbationTool implements LuaTool {
     'Check whether a probation period is lawful for the employee’s country, and when it ends';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
     probationEndDate: z
       .string()
       .optional()
@@ -61,7 +61,7 @@ export class CheckProbationTool implements LuaTool {
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_record');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;

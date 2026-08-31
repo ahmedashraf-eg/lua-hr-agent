@@ -9,8 +9,10 @@ It reads and writes BambooHR as the system of record, answers policy questions
 from a vector-searched knowledge base, and pushes live activity to a Google
 Sheet.
 
-**Workflows implemented: Onboarding and Leave Management** (two of the four in
-the brief). SOP lookup and Iqama expiry alerting support both and are included.
+**All four workflows are implemented** — Onboarding, Leave Management, SOP
+Requests and Daily Performance Management. The brief asked for two; the first
+two were built and submitted, and the remaining two followed. Iqama expiry
+alerting runs across all of them.
 
 ---
 
@@ -35,9 +37,9 @@ the brief). SOP lookup and Iqama expiry alerting support both and are included.
                    ┌─────────▼─────────┐
                    │   Lua Agent OS    │   persona, LLM routing,
                    │                   │   conversation state,
-                   │  4 skills         │   channel delivery
-                   │  9 tools          │
-                   │  1 scheduled job  │
+                   │  7 skills         │   channel delivery
+                   │  16 tools         │
+                   │  2 scheduled jobs │
                    └─────────┬─────────┘
                              │
               ┌──────────────┼──────────────┐
@@ -49,13 +51,16 @@ the brief). SOP lookup and Iqama expiry alerting support both and are included.
      │ countryRules  │ │ employees │ │ LeaveLog     │
      │ leave         │ │ directory │ │ SOPGaps      │
      │ gratuity      │ │ time_off  │ │ IqamaAlerts  │
-     │ iqama         │ └───────────┘ └──────────────┘
-     │ tenure        │
-     └───────────────┘        ┌──────────────────┐
-                              │ Lua Data API     │
-                              │ hr_policies      │
-                              │ 8 SOPs, vector   │
-                              └──────────────────┘
+     │ iqama         │ │ reports   │ │ Performance  │
+     │ tenure        │ └───────────┘ │ SOPRequests  │
+     │ sopRequests   │               └──────────────┘
+     │ performance   │
+     └───────────────┘   ┌──────────────────────┐
+                         │ Lua Data API         │
+                         │ hr_policies (vector) │
+                         │ sop_requests         │
+                         │ performance_checkins │
+                         └──────────────────────┘
 ```
 
 The platform owns infrastructure, model selection, tool-calling and channel
@@ -79,10 +84,20 @@ return structured data. No business rules.
 
 ### Two design decisions worth explaining
 
-**Every tool takes `employeeId` as a required input.** The model extracts it
-from the conversation. There is no default and no ambient "current employee",
-so it is structurally impossible for one employee's question to be answered
-from another's record.
+**Identity is resolved below the model, never from the conversation.** The
+trust anchor is `user._luaProfile` — the userId, verified phone numbers and
+email addresses the platform supplies from the channel the message actually
+arrived on. It is read-only, and nothing the model produces can change it.
+
+On first contact the agent matches those against BambooHR by work email or
+mobile number; an exact single match binds the account to a personnel record.
+Where the channel carries nothing usable, it falls back to a challenge. After
+that, every tool reads the employee from the stored binding, and
+`domain/authorization.ts` decides whether the caller may see anyone else.
+
+The practical effect: an employee asking *"what is Madison's gratuity?"* is
+refused by the tool layer, not deflected by the model. A prompt cannot argue
+with a function that never received the record.
 
 **Tools refuse; they don't throw.** A failure returns
 `{ ok: false, error, detail, action }` — `detail` is written to be read aloud
@@ -115,6 +130,8 @@ speaking, not baked into the business logic.
 
 | Tool | Skill | What it does |
 |---|---|---|
+| `verify_my_identity` | identity | Binds the channel identity to a personnel record |
+| `whoami` | identity | Who the agent believes it is talking to, and what they may do |
 | `get_employee` | onboarding | Record, country, tenure |
 | `check_probation` | onboarding | Validates a probation period against the statutory cap |
 | `start_onboarding` | onboarding | Country-specific document list, probation terms, orientation |
@@ -123,12 +140,129 @@ speaking, not baked into the business logic.
 | `calculate_gratuity` | leave | End-of-service award |
 | `check_iqama_expiry` | compliance | Saudi residency permit status and urgency |
 | `search_policies` | compliance | Vector search over the SOP knowledge base |
+| `submit_sop_request` | requests | Raise an HR service request, with SLA and owner |
+| `check_request_status` | requests | Where a request got to, by reference or employee |
+| `update_request_status` | requests | Advance a request through its lifecycle. HR only. |
+| `submit_daily_checkin` | performance | A lead's daily accomplishments, blockers and 1–5 ratings |
+| `get_team_summary` | performance | Weekly averages, trends, blockers, reporting rate |
 | `seed_policies` | setup | One-off knowledge-base load. Not for conversation. |
+
+### Scheduled jobs
 
 **`iqama-expiry-sweep`** runs `0 7 * * 0-4` in `Asia/Riyadh` — 07:00 Sunday to
 Thursday, the Gulf working week. It scans the directory, skips non-Saudi staff,
-writes alerts to the dashboard and digests the urgent ones to HR. Guarded on
-`job.execution.occurrenceId`, since jobs run at least once.
+writes alerts to the dashboard and digests the urgent ones to HR.
+
+**`daily-checkin-reminder`** runs `0 16 * * 0-4` — end of the working day. It
+nudges team leads who owe a check-in, because daily performance reporting fails
+on collection rather than on analysis. A dashboard nobody feeds is worse than
+no dashboard: it looks authoritative while being empty.
+
+Both are guarded on `job.execution.occurrenceId`, since jobs run at least once
+and the same occurrence can be retried.
+
+---
+
+## Identity and access
+
+### Who the caller is
+
+`verify_my_identity` runs before anything else touches a record. It reads
+`user._luaProfile` — platform-supplied, immutable — and matches the verified
+email addresses and mobile numbers against BambooHR.
+
+Phone matching compares the last nine digits. A Saudi mobile is stored as
+`+966 5X XXX XXXX` and arrives from WhatsApp as `9665XXXXXXXX`; comparing the
+significant tail sidesteps country codes, leading zeros and punctuation without
+parsing dialling plans for four countries.
+
+An exact single match binds silently, so in practice verification is invisible.
+More than one match is treated as **no** match — an ambiguous identity is worse
+than none. Where the channel carries nothing usable, the fallback is employee
+ID plus start date. A wrong ID and a wrong date return the *same* failure, so
+the response cannot be used to discover which employee IDs exist.
+
+Role and reporting line are re-read from BambooHR on every call rather than
+cached on the account. That costs a request and means a promotion or a team
+move takes effect immediately, instead of persisting until someone remembers
+to clear a stale claim.
+
+### Who may see what
+
+| | Own record | Reports' records | Reports' pay and balances | Anyone |
+|---|---|---|---|---|
+| Employee | ✓ | — | — | — |
+| Manager | ✓ | ✓ | — | — |
+| HR | ✓ | ✓ | ✓ | ✓ |
+
+Two deliberate lines:
+
+**A manager cannot see a report's entitlements.** They see that the person
+exists, where they sit and how their team is performing — but leave balances
+and end-of-service figures stay between the employee and HR. That is a
+judgement call, and it is in one readable function rather than spread across
+thirteen tools.
+
+**Not even HR can file a check-in for a team they did not observe.** A
+performance rating is a first-hand judgement, not an administrative act, so
+`submit_daily_checkin` takes no team-lead parameter at all — the lead filing it
+is always the caller, and the ratings must be for their own reports.
+
+Refusals are worded so they cannot be mined. A request reference the caller may
+not see returns the same response as one that does not exist, because
+distinguishing them would confirm the reference is real.
+
+`domain/authorization.ts` is pure and has no imports, so the whole policy is
+exercised by 53 assertions covering every role against every action — including
+that `Chrome Platform Engineer` does not accidentally parse as HR.
+
+---
+
+## The two later workflows
+
+### SOP Requests
+
+`search_policies` answers *"what is the transfer policy?"*. These tools handle
+the other half — an employee who wants to actually make the request.
+
+Seven request types, each with its own owning department and SLA: salary
+certificates and employment letters (2 working days, People team), transfers
+(10 days, HR Business Partner), exit and re-entry visas and Iqama renewals
+(5 and 10 days, Government Relations, Saudi Arabia only), housing allowance
+advances (7 days, People and Finance), and a general catch-all.
+
+Two details worth noting:
+
+**Due dates count working days on a Sunday-to-Thursday week.** Quoting a
+calendar-day SLA in Riyadh overpromises by two days in most weeks.
+
+**Missing details are asked for, never invented.** Each type declares the
+fields it needs. Submit without them and the tool returns the exact questions
+to ask, in English and Arabic, rather than filing an incomplete request.
+
+### Daily Performance Management
+
+No system exists for this in the client today, so the agent is the system of
+record. A team lead files what the team accomplished, what is blocking them,
+and a 1–5 rating per member. Check-ins are stored in Lua's Data collection and
+mirrored to the sheet **one row per member per day** — flat, so the dashboard
+can pivot and chart rather than just accumulate.
+
+`get_team_summary` answers *"how did Ahmad's team perform this week?"* with
+per-member averages, direction of travel, blockers recurring across three or
+more days, and the reporting rate.
+
+Three deliberate choices:
+
+**A second check-in on the same day replaces the first.** Leads correct
+themselves, and a weekly average built on duplicates is quietly wrong.
+
+**Trends compare the first and last thirds, not a fitted line.** With three to
+five data points a regression reads noise as signal, and a lead asking "is she
+improving" wants a robust answer rather than a precise one.
+
+**No check-ins is reported as a reporting gap, not as a bad week.** The agent
+is instructed never to infer performance from missing data.
 
 ---
 
@@ -225,8 +359,11 @@ lua chat -e production -m "كم رصيد إجازتي؟ رقمي الوظيفي 
 | `BAMBOOHR_API_KEY` | yes | Must be generated by an account admin — a key inherits its creator's permissions |
 | `BAMBOOHR_SUBDOMAIN` | yes | The part before `.bamboohr.com` |
 | `SHEETS_WEBAPP_URL` | no | Without it, logging degrades gracefully rather than failing |
+| `SHEETS_SECRET` | no | Must match `SHARED_SECRET` in the Apps Script properties |
+| `HR_EMPLOYEE_IDS` | no | Comma-separated. Set it and the HR job-title heuristic is disabled entirely. |
 | `BAMBOOHR_IQAMA_NUMBER_FIELD` | no | Defaults to `customIqamaNumber` |
 | `BAMBOOHR_IQAMA_EXPIRY_FIELD` | no | Defaults to `customIqamaExpiry` |
+| `BAMBOOHR_TIME_OFF_*_ID` | no | Overrides for annual / sick / unpaid, if auto-discovery is wrong |
 | `BAMBOOHR_MOCK` | no | `true` runs against fixtures spanning all four countries |
 
 ### Google Sheets
@@ -242,13 +379,23 @@ log, and the wrong place to spend a time-boxed build.
 ### Tests
 
 ```bash
-npx tsx src/domain/domain.test.ts       # 58 assertions — statutory boundaries
-npx tsx src/knowledge/policies.test.ts  # 61 assertions — policy text vs engine
+npx tsx src/domain/domain.test.ts         # 58 — statutory boundaries
+npx tsx src/domain/workflows.test.ts      # 59 — SLA and aggregation
+npx tsx src/domain/authorization.test.ts  # 53 — who may see whose record
+npx tsx src/knowledge/policies.test.ts    # 61 — policy text vs rules engine
 ```
 
-The domain suite pins the exact year at which each tier flips, both sides of
+231 assertions in total, and a clean `tsc --noEmit`.
+
+The statutory suite pins the exact year at which each tier flips, both sides of
 every resignation cliff, the UAE cap, and the Iqama tier edges — the places
-where an off-by-one costs an employee real money.
+where an off-by-one costs an employee real money. The workflow suite covers the
+working-day SLA arithmetic across a Friday-Saturday weekend, and the 2.5
+threshold that decides whether a team member gets surfaced to their manager.
+
+The authorization suite is written as an explicit role-by-action matrix rather
+than a handful of happy paths, because an authorization bug is invisible until
+someone finds it and the failure mode is disclosure rather than an error.
 
 ---
 
@@ -262,17 +409,21 @@ is the correct behaviour but means the directory is not representative.
 **Iqama number and expiry are BambooHR custom fields**, not native ones. Field
 aliases are configurable because they differ per account.
 
-**Time-off type IDs are hardcoded** as `1`/`2`/`3` for annual, sick and unpaid.
-These are account-specific and would be read from
-`/v1/meta/time_off/types` in production.
+**Time-off type IDs resolve in three layers** — an env override, then the
+account's own `/v1/meta/time_off/types`, then the IDs observed on this tenant
+(78/79/83). They were briefly hardcoded as 1/2/3, which was wrong here and
+silently so: a sick request filed under the annual type looks successful and is
+only caught at payroll.
 
 **BambooHR returns a created request's ID in the `Location` header**, not the
 response body — `submitTimeOff` parses it from there. This is undocumented and
 was found by inspection.
 
-**The Sheets endpoint is open to anyone holding the URL.** Acceptable for a
-demo dashboard of mock data; production needs a shared secret in the payload or
-a service account.
+**The Sheets endpoint is protected by a shared secret, not by authentication.**
+Set `SHARED_SECRET` in the Apps Script properties and `SHEETS_SECRET` in the
+agent's environment; the deployment then rejects writes from anyone who merely
+has the URL. Leave the script property unset and it stays open. A real
+deployment wants a service account.
 
 **Sick leave tiers outside Saudi Arabia** are the common statutory position
 rather than a verified reading, and should be confirmed with local counsel
@@ -288,19 +439,49 @@ own approval chain; the agent does not model manager hierarchy itself.
 **The SOPs are mock content** written for this exercise, not real company
 policy.
 
+**Performance ratings are one lead's judgement**, self-reported, across a
+handful of days. The agent is instructed to present a low average as a prompt
+for a conversation rather than a verdict, and never to speculate about why a
+rating is low. That framing is a persona instruction, not an enforced control.
+
+**The identity challenge is a start date, not a real second factor.** It is
+known to the employee and to HR and is harmless if it leaks, which makes it
+reasonable for a demo — and it is rate-limited to five attempts before a
+fifteen-minute lockout, counted on the account so a new conversation does not
+reset it. Production should send a one-time code to the number already on the
+personnel record. Auto-binding by verified email or mobile is genuinely strong;
+the fallback is the weak link.
+
+**HR privilege falls back to a job-title heuristic.** Set `HR_EMPLOYEE_IDS` and
+an explicit allowlist takes over completely — a title cannot then bypass it.
+Left unset, department and title are matched, which is derived from the HRIS
+(so it revokes itself on a job change) but is still inference.
+
+**Request SLAs are operational conventions, not statute.** Unlike leave and
+gratuity, nothing in labour law sets them; they are placeholders a real client
+would replace with their own service catalogue.
+
+**Request status is advanced by HR, not by the owning system.**
+`update_request_status` lets HR move a request through its lifecycle, and
+`canTransition` refuses to reopen anything already completed or rejected. What
+is still missing is a webhook from whatever system Government Relations or
+Finance actually work in, so status changes reach the employee without someone
+retyping them.
+
 ---
 
 ## What I would do next
 
-1. **Read time-off types from the API** rather than hardcoding IDs.
-2. **Webhook on BambooHR approval** so the agent notifies the employee when a
-   manager approves, instead of leaving them to check.
-3. **Nitaqat / Saudization reporting** — named in the brief, out of scope for a
-   time-boxed build, and the natural next workflow given the Riyadh HQ.
-4. **The remaining two workflows** — SOP request handling as a full workflow,
-   and Daily Performance Management.
-5. **Harden the Sheets endpoint**, or move to a service account once there is
-   somewhere to keep the key.
-6. **Real SOP ingestion** — the current knowledge base is eight documents; a
+1. **Replace the identity challenge with a one-time code** to the number
+   already on the personnel record. Rate limiting makes the current fallback
+   defensible; it does not make it strong.
+2. **Webhooks in both directions** — from BambooHR when a manager approves
+   leave, and from Government Relations and Finance when a request moves, so
+   status reaches the employee without anyone retyping it.
+3. **Nitaqat / Saudization reporting** — named in the brief and still not built.
+   The natural next workflow given the Riyadh HQ.
+4. **Move Sheets to a service account.** The shared secret means holding the
+   URL is not enough, but it is a password in an environment variable.
+5. **Real SOP ingestion** — the current knowledge base is eight documents; a
    50,000-person group has hundreds, and the `SOPGaps` log is the right input
    for prioritising which to load first.

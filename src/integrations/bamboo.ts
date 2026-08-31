@@ -50,6 +50,7 @@ export interface Employee {
   firstName: string;
   lastName: string;
   workEmail?: string;
+  mobilePhone?: string;
   jobTitle?: string;
   department?: string;
   supervisor?: string;
@@ -140,6 +141,8 @@ const EMPLOYEE_FIELDS = [
   'firstName', 'lastName', 'displayName', 'workEmail', 'jobTitle',
   'department', 'supervisor', 'location', 'country', 'hireDate',
   'customMonthlyWage', 'customBasicWage', 'payRate',
+  // Needed to match a WhatsApp number against a personnel record.
+  'mobilePhone', 'homePhone', 'workPhone',
 ];
 
 function toNumber(value: unknown): number | undefined {
@@ -177,6 +180,7 @@ function mapEmployee(raw: Record<string, unknown>, cfg = config()): Employee {
     firstName: (raw.firstName as string) ?? '',
     lastName: (raw.lastName as string) ?? '',
     workEmail: (raw.workEmail as string) || undefined,
+    mobilePhone: (raw.mobilePhone as string) || (raw.workPhone as string) || undefined,
     jobTitle: (raw.jobTitle as string) || undefined,
     department: (raw.department as string) || undefined,
     supervisor: (raw.supervisor as string) || undefined,
@@ -238,6 +242,88 @@ export async function getDirectory(): Promise<Employee[]> {
 
   const data = await request<{ employees?: Record<string, unknown>[] }>('/employees/directory');
   return (data.employees ?? []).map((raw) => mapEmployee(raw, cfg));
+}
+
+/**
+ * The people reporting to a given manager.
+ *
+ * BambooHR stores the supervisor as a display name rather than an id, so this
+ * matches on name — case-insensitively, and on surname alone as a fallback,
+ * because a team lead typing a check-in writes "Ahmad" not "Ahmad Al-Rashid".
+ */
+export async function getReports(managerName: string): Promise<Employee[]> {
+  const roster = await getDirectory();
+  const needle = managerName.trim().toLowerCase();
+  if (!needle) return [];
+
+  const exact = roster.filter((e) => e.supervisor?.trim().toLowerCase() === needle);
+  if (exact.length) return exact;
+
+  return roster.filter((e) => {
+    const supervisor = e.supervisor?.trim().toLowerCase();
+    if (!supervisor) return false;
+    return supervisor.includes(needle) || needle.includes(supervisor);
+  });
+}
+
+/** Find employees by name, for resolving a team lead the user named in chat. */
+export async function findEmployeesByName(name: string): Promise<Employee[]> {
+  const roster = await getDirectory();
+  const needle = name.trim().toLowerCase();
+  if (!needle) return [];
+
+  return roster.filter((e) => e.displayName?.toLowerCase().includes(needle));
+}
+
+/**
+ * Time-off type IDs, resolved from the account rather than assumed.
+ *
+ * These were hardcoded as 1/2/3. That is not a limitation, it is a silent
+ * correctness bug: BambooHR numbers time-off types per account, so on any
+ * account where sick leave is not id 2, a sick request files as something
+ * else and nobody finds out until payroll.
+ *
+ * Cached for the life of the execution — the mapping does not change mid-turn,
+ * and every leave request would otherwise pay for the lookup.
+ */
+let timeOffTypeCache: Record<string, string> | null = null;
+
+export async function getTimeOffTypeIds(): Promise<Record<string, string>> {
+  if (timeOffTypeCache) return timeOffTypeCache;
+
+  const fallback = { annual: '78', sick: '79', unpaid: '83' };
+  if (USE_MOCK) return fallback;
+
+  try {
+    const types = await request<Array<{ id: string | number; name: string }>>(
+      '/meta/time_off/types',
+    );
+
+    const list = Array.isArray(types) ? types : (types as { timeOffTypes?: typeof types }).timeOffTypes ?? [];
+    const resolved: Record<string, string> = { ...fallback };
+
+    for (const type of list) {
+      const name = String(type.name ?? '').toLowerCase();
+      const id = String(type.id);
+
+      // Match on meaning, not on exact wording — accounts name these
+      // "Annual Leave/Holiday", "Sick", "Unpaid Time Off" and so on.
+      if (/annual|vacation|holiday|paid time off|\bpto\b/.test(name)) {
+        resolved.annual ??= id;
+        if (resolved.annual === fallback.annual) resolved.annual = id;
+      } else if (/sick|medical|illness/.test(name)) {
+        resolved.sick = id;
+      } else if (/unpaid|leave without pay|\blwop\b/.test(name)) {
+        resolved.unpaid = id;
+      }
+    }
+
+    timeOffTypeCache = resolved;
+    return resolved;
+  } catch {
+    // A restricted meta endpoint should not stop someone booking leave.
+    return fallback;
+  }
 }
 
 /** Existing time-off requests, used to compute a committed balance. */

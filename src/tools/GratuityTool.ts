@@ -10,7 +10,7 @@ import { LuaTool } from 'lua-cli';
 import { z } from 'zod';
 
 import { calculateGratuity } from '../domain/gratuity';
-import { money, resolveEmployee } from './shared';
+import { money, resolveSubject } from './shared';
 
 export class CalculateGratuityTool implements LuaTool {
   name = 'calculate_gratuity';
@@ -18,7 +18,7 @@ export class CalculateGratuityTool implements LuaTool {
     'Calculate end-of-service gratuity for an employee, applying their country’s statutory formula';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
     reason: z
       .enum(['resignation', 'termination'])
       .describe(
@@ -35,7 +35,7 @@ export class CalculateGratuityTool implements LuaTool {
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_entitlements');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;

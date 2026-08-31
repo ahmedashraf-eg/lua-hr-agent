@@ -36,6 +36,15 @@ var TABS = {
     'Timestamp', 'Employee ID', 'Employee', 'Iqama Expiry',
     'Days Remaining', 'Severity',
   ],
+  // One row per team member per day — flat so the sheet can pivot and chart.
+  Performance: [
+    'Date', 'Team Lead ID', 'Team Lead', 'Employee ID', 'Employee',
+    'Rating', 'Accomplishments', 'Blockers', 'Note', 'Logged At',
+  ],
+  SOPRequests: [
+    'Timestamp', 'Reference', 'Request Type', 'Employee ID', 'Employee',
+    'Country', 'Status', 'Owner', 'Due By', 'Details',
+  ],
 };
 
 var HEADER_BACKGROUND = '#1b6b52';
@@ -87,6 +96,17 @@ function doPost(e) {
     }
 
     var body = JSON.parse(e.postData.contents);
+
+    // A Web App set to "anyone with the link" accepts writes from anyone who
+    // has the link. Set SHARED_SECRET under Project Settings -> Script
+    // Properties, and the same value as SHEETS_SECRET in the agent's env.
+    // Leaving the property unset keeps the endpoint open, which is only
+    // acceptable for a throwaway demo.
+    var expected = PropertiesService.getScriptProperties().getProperty('SHARED_SECRET');
+    if (expected && body.secret !== expected) {
+      return json({ ok: false, error: 'Rejected: bad or missing secret' });
+    }
+
     var tabName = body.tab || 'LeaveLog';
     var row = body.row;
 
@@ -122,9 +142,12 @@ function doGet() {
     return spreadsheet.getSheetByName(tabName) !== null;
   });
 
+  var secured = Boolean(PropertiesService.getScriptProperties().getProperty('SHARED_SECRET'));
+
   return json({
     ok: true,
     service: 'HR Agent dashboard endpoint',
+    secured: secured,
     tabsReady: present,
     tabsMissing: Object.keys(TABS).filter(function (t) {
       return present.indexOf(t) === -1;

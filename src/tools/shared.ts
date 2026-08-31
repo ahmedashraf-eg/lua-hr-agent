@@ -10,6 +10,8 @@
 
 import { BambooError, getEmployee, type Employee } from '../integrations/bamboo';
 import { getCountryRule, type CountryRule } from '../domain/countryRules';
+import type { Action, Caller } from '../domain/authorization';
+import { check, getCaller } from './identity';
 
 /** A refusal the agent can read out verbatim, rather than a thrown stack. */
 export interface Refusal {
@@ -72,6 +74,53 @@ export async function resolveEmployee(employeeId: string): Promise<Resolved | Re
   }
 
   return { ok: true, employee, rule };
+}
+
+/* ------------------------------------------------------------ the gate */
+
+/**
+ * Resolve the employee a tool should act on, and prove the caller may.
+ *
+ * This is the single door. Every tool that touches a personnel record goes
+ * through it, and no tool trusts an `employeeId` from the model on its own:
+ *
+ *   - the caller is read from their verified identity binding, not the prompt
+ *   - omitting `requestedEmployeeId` means "the person I am talking to"
+ *   - naming someone else is allowed only where policy says so, and the policy
+ *     lives in domain/authorization.ts where it can be read and tested
+ *
+ * The practical effect: an employee asking "what is Madison's gratuity"
+ * gets a refusal from the tool layer, not a polite deflection from the model.
+ */
+export async function resolveSubject(
+  requestedEmployeeId: string | undefined,
+  action: Action,
+): Promise<(Resolved & { caller: Caller; isSelf: boolean }) | Refusal> {
+  const callerResult = await getCaller();
+
+  if (!callerResult.verified) {
+    return refuse('identity_not_verified', callerResult.message, callerResult.action);
+  }
+
+  const { caller } = callerResult;
+  const targetId = requestedEmployeeId?.trim() || caller.employeeId;
+  const isSelf = targetId === caller.employeeId;
+
+  const resolved = await resolveEmployee(targetId);
+  if (!resolved.ok) return resolved;
+
+  if (!isSelf) {
+    const decision = check(caller, targetId, action, resolved.employee.displayName);
+    if (!decision.allowed) {
+      return refuse(
+        `access_denied_${decision.reason}`,
+        decision.message,
+        'Tell the employee plainly that this is not something you can share with them, and point them to HR. Do not restate any part of the other person’s record — you have not been shown it.',
+      );
+    }
+  }
+
+  return { ...resolved, caller, isSelf };
 }
 
 /** Round money to two places without floating-point noise in the output. */

@@ -10,20 +10,41 @@ import { LuaTool } from 'lua-cli';
 import { z } from 'zod';
 
 import { balance, entitlements, validateLeaveRequest, type LeaveRecord, type LeaveType } from '../domain/leave';
-import { getTimeOffRequests, submitTimeOff } from '../integrations/bamboo';
+import { getTimeOffRequests, getTimeOffTypeIds, submitTimeOff } from '../integrations/bamboo';
 import { logLeaveRequest } from '../integrations/sheets';
-import { currentChannel, resolveEmployee } from './shared';
+import { currentChannel, resolveSubject } from './shared';
 
 import { env } from 'lua-cli';
 
 const LEAVE_TYPE = z.enum(['annual', 'sick', 'unpaid']);
 
-/** BambooHR time-off type IDs differ per account; override via env if needed. */
-const TIME_OFF_TYPE_IDS: Record<LeaveType, string> = {
-  annual: env('BAMBOOHR_TIME_OFF_ANNUAL_ID') || '78',
-  sick: env('BAMBOOHR_TIME_OFF_SICK_ID') || '79',
-  unpaid: env('BAMBOOHR_TIME_OFF_UNPAID_ID') || '83',
+/**
+ * Resolve the BambooHR time-off type ID for a leave type.
+ *
+ * Three layers, most specific first: an explicit env override, then whatever
+ * the account's own meta endpoint reports, then the IDs observed on this
+ * tenant. Getting this wrong is silent — a sick request filed under the annual
+ * type looks successful and is only discovered at payroll — so it resolves
+ * from the account rather than trusting a constant.
+ */
+const TIME_OFF_ENV_OVERRIDE: Record<LeaveType, string | undefined> = {
+  annual: env('BAMBOOHR_TIME_OFF_ANNUAL_ID') || undefined,
+  sick: env('BAMBOOHR_TIME_OFF_SICK_ID') || undefined,
+  unpaid: env('BAMBOOHR_TIME_OFF_UNPAID_ID') || undefined,
 };
+
+const TIME_OFF_OBSERVED: Record<LeaveType, string> = {
+  annual: '78',
+  sick: '79',
+  unpaid: '83',
+};
+
+async function timeOffTypeId(leaveType: LeaveType): Promise<string> {
+  if (TIME_OFF_ENV_OVERRIDE[leaveType]) return TIME_OFF_ENV_OVERRIDE[leaveType];
+
+  const discovered = await getTimeOffTypeIds();
+  return discovered[leaveType] ?? TIME_OFF_OBSERVED[leaveType];
+}
 
 /** Map BambooHR's time-off requests onto the domain's record shape. */
 async function loadRecords(employeeId: string): Promise<LeaveRecord[]> {
@@ -60,12 +81,12 @@ export class CheckLeaveBalanceTool implements LuaTool {
     'Check an employee’s remaining annual or sick leave, using their country’s statutory entitlement';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
     leaveType: LEAVE_TYPE.optional().default('annual'),
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_entitlements');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;
@@ -118,7 +139,7 @@ export class RequestLeaveTool implements LuaTool {
     'Submit a leave request for an employee after checking it against their balance and country rules';
 
   inputSchema = z.object({
-    employeeId: z.string().describe('The BambooHR employee ID'),
+    employeeId: z.string().optional().describe('Omit this for the person you are talking to — their identity is taken from their verified account, never from the conversation. Supply it only when an HR user, or a line manager asking about their own report, names someone else.'),
     leaveType: LEAVE_TYPE.describe('annual, sick or unpaid'),
     startDate: z.string().describe('First day of leave, YYYY-MM-DD'),
     endDate: z.string().describe('Last day of leave, YYYY-MM-DD'),
@@ -126,7 +147,7 @@ export class RequestLeaveTool implements LuaTool {
   });
 
   async execute(input: z.infer<typeof this.inputSchema>) {
-    const resolved = await resolveEmployee(input.employeeId);
+    const resolved = await resolveSubject(input.employeeId, 'view_entitlements');
     if (!resolved.ok) return resolved;
 
     const { employee, rule } = resolved;
@@ -159,7 +180,7 @@ export class RequestLeaveTool implements LuaTool {
       employeeId: employee.id,
       start: input.startDate,
       end: input.endDate,
-      timeOffTypeId: TIME_OFF_TYPE_IDS[input.leaveType],
+      timeOffTypeId: await timeOffTypeId(input.leaveType),
       amount: check.days!,
       note: input.note,
     });
