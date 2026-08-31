@@ -139,6 +139,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 const EMPLOYEE_FIELDS = [
   'firstName', 'lastName', 'displayName', 'workEmail', 'jobTitle',
   'department', 'supervisor', 'location', 'country', 'hireDate',
+  'customMonthlyWage', 'customBasicWage', 'payRate',
 ];
 
 function toNumber(value: unknown): number | undefined {
@@ -207,11 +208,34 @@ export async function getEmployee(employeeId: string): Promise<Employee> {
   return mapEmployee({ ...raw, id: employeeId }, cfg);
 }
 
-/** Fetch the whole roster. Used by the Iqama sweep. */
+/** Fetch the whole roster with Iqama custom fields. Used by the Iqama sweep. */
 export async function getDirectory(): Promise<Employee[]> {
   if (USE_MOCK) return MOCK_EMPLOYEES.map((e) => ({ ...e }));
 
   const cfg = config();
+  try {
+    const report = await request<{ employees?: Record<string, unknown>[] }>(
+      '/reports/custom?format=JSON',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          title: 'Iqama Sweep Roster',
+          fields: [
+            ...EMPLOYEE_FIELDS,
+            cfg.iqamaNumberField,
+            cfg.iqamaExpiryField,
+            'customMonthlyWage',
+          ],
+        }),
+      },
+    );
+    if (report.employees && report.employees.length > 0) {
+      return report.employees.map((raw) => mapEmployee(raw, cfg));
+    }
+  } catch {
+    // Fall back to standard directory if custom reports are restricted
+  }
+
   const data = await request<{ employees?: Record<string, unknown>[] }>('/employees/directory');
   return (data.employees ?? []).map((raw) => mapEmployee(raw, cfg));
 }

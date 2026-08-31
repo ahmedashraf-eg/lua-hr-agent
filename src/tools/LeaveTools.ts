@@ -70,8 +70,9 @@ export class CheckLeaveBalanceTool implements LuaTool {
 
     const { employee, rule } = resolved;
     const records = await loadRecords(employee.id);
+    const leaveType: LeaveType = input.leaveType || 'annual';
 
-    const bal = balance(rule.code, employee.hireDate, input.leaveType, records);
+    const bal = balance(rule.code, employee.hireDate, leaveType, records);
     const ent = entitlements(rule.code, employee.hireDate);
     if (!bal || !ent) {
       return {
@@ -82,7 +83,7 @@ export class CheckLeaveBalanceTool implements LuaTool {
       };
     }
 
-    if (input.leaveType === 'unpaid') {
+    if (leaveType === 'unpaid') {
       return {
         ok: true,
         employeeId: employee.id,
@@ -99,13 +100,13 @@ export class CheckLeaveBalanceTool implements LuaTool {
       employeeId: employee.id,
       employeeName: employee.displayName,
       country: rule.code,
-      leaveType: input.leaveType,
+      leaveType,
       entitlementDays: bal.entitlement,
       takenOrPendingDays: bal.reserved,
       remainingDays: bal.remaining,
       // Surfaced so the agent can explain a graduated sick-leave year rather
       // than quoting a single misleading total.
-      sickLeaveTiers: input.leaveType === 'sick' ? ent.sickTiers : undefined,
+      sickLeaveTiers: leaveType === 'sick' ? ent.sickTiers : undefined,
       source: bal.source,
     };
   }
