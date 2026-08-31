@@ -1,0 +1,28 @@
+agent:
+  agentId: baseAgent_agent_1788171476995_6gsfvk1sh
+  orgId: 4bef9c07-c775-4080-8928-18dfc4fc8a2b
+skills:
+  - name: hr-onboarding
+    skillId: f921a286-ad60-4dfc-9a86-00f0dfbae779
+    version: 1.0.3
+  - name: hr-leave
+    skillId: 754526df-955e-4e8e-8eb0-cd746c7cb611
+    version: 1.0.3
+  - name: hr-compliance
+    skillId: 21c644e2-79a1-4a7a-b2ff-5bd7568e54d6
+    version: 1.0.3
+  - name: hr-setup
+    skillId: 0e1081d7-cc96-4cc7-aa5e-83192f0a4e97
+    version: 1.0.3
+webhooks: []
+jobs:
+  - jobId: 10eda07f-185d-411b-b53e-0ec62f71a878
+    name: iqama-expiry-sweep
+    version: 1.0.3
+preprocessors: []
+postprocessors: []
+mcpServers: []
+backup:
+  activeVersion: 3
+  lastHash: 503a508845f5a36d7554459f6be11797a6f6a772e332a1c682ffb469e8e4a7ba
+  lastPushedAt: '2026-08-31T11:43:08.075Z'
