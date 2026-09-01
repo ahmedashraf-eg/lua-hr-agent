@@ -261,6 +261,12 @@
 
     <script src="https://lua-ai-global.github.io/lua-pop/lua-pop.umd.js"></script>
     <script>
+      // Clear old session tokens so the widget always loads clean and fresh
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch (e) {}
+
       window.LuaPop.init({
         agentId: "baseAgent_agent_1788171476995_6gsfvk1sh",
 
