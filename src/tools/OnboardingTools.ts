@@ -97,9 +97,12 @@ export class StartOnboardingTool implements LuaTool {
       hireDate: employee.hireDate,
       daysSinceHire,
 
+      // English labels only. The Arabic exists in the domain for reference,
+      // but returning both lets the tool decide what the employee reads —
+      // which belongs to the persona, and in practice picks the wrong one.
       documents: {
-        mandatory: documents.filter((d) => d.mandatory),
-        optional: documents.filter((d) => !d.mandatory),
+        mandatory: documents.filter((d) => d.mandatory).map((d) => ({ id: d.id, label: d.label })),
+        optional: documents.filter((d) => !d.mandatory).map((d) => ({ id: d.id, label: d.label })),
         total: documents.length,
       },
 

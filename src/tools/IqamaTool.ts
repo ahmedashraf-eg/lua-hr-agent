@@ -72,10 +72,8 @@ export class CheckIqamaExpiryTool implements LuaTool {
       iqamaExpiry: result.alert.iqamaExpiry,
       daysRemaining: result.alert.daysRemaining,
       severity: result.alert.severity,
-      alert: {
-        en: result.alert.message,
-        ar: result.alert.messageAr,
-      },
+      // English only — the persona renders it in the employee's language.
+      alert: result.alert.message,
       agentGuidance:
         result.alert.severity === 'expired'
           ? 'This is urgent and carries legal exposure for the employee. Escalate to HR in the same reply.'

@@ -10,7 +10,7 @@ import { LuaTool } from 'lua-cli';
 import { z } from 'zod';
 
 import { balance, entitlements, validateLeaveRequest, type LeaveRecord, type LeaveType } from '../domain/leave';
-import { getTimeOffRequests, getTimeOffTypeIds, submitTimeOff } from '../integrations/bamboo';
+import { amountInDays, getTimeOffRequests, getTimeOffTypeIds, submitTimeOff, unwrap } from '../integrations/bamboo';
 import { logLeaveRequest } from '../integrations/sheets';
 import { currentChannel, resolveSubject } from './shared';
 
@@ -46,33 +46,63 @@ async function timeOffTypeId(leaveType: LeaveType): Promise<string> {
   return discovered[leaveType] ?? TIME_OFF_OBSERVED[leaveType];
 }
 
-/** Map BambooHR's time-off requests onto the domain's record shape. */
+/**
+ * Map BambooHR's time-off requests onto the domain's record shape.
+ *
+ * Three things here are easy to get wrong and were, initially:
+ *
+ *   - `status` and `type` come back as OBJECTS, not strings. Calling
+ *     `.toString()` on them yields "[object Object]", which matches no branch,
+ *     so every request fell through to "pending annual leave" — including
+ *     denied ones, cancelled ones, and bereavement.
+ *   - `amount.unit` is often "hours". Forty hours of leave read as forty days.
+ *   - BambooHR has many time-off types. Anything that is not recognisably
+ *     sick or unpaid is now `null` and DROPPED, rather than silently counted
+ *     against the annual entitlement.
+ *
+ * Together those turned six days of real 2026 leave into forty-two.
+ */
+function classifyType(raw: string): LeaveType | null {
+  const name = raw.toLowerCase();
+  if (!name) return null;
+
+  if (/sick|medical|illness/.test(name)) return 'sick';
+  if (/unpaid|without pay|\blwop\b/.test(name)) return 'unpaid';
+  if (/annual|vacation|holiday|paid time off|\bpto\b/.test(name)) return 'annual';
+
+  // Bereavement, jury duty, parental, floating holidays and the rest draw on
+  // their own allowances, not on annual leave.
+  return null;
+}
+
+function classifyStatus(raw: string): LeaveRecord['status'] {
+  const status = raw.toLowerCase();
+  if (status === 'approved') return 'approved';
+  if (status === 'denied' || status === 'rejected') return 'rejected';
+  if (status === 'cancelled' || status === 'canceled') return 'cancelled';
+  return 'pending';
+}
+
 async function loadRecords(employeeId: string): Promise<LeaveRecord[]> {
   const requests = await getTimeOffRequests(employeeId);
 
-  return requests.map((r) => {
-    const status = r.status?.toString().toLowerCase() ?? 'pending';
-    return {
-      id: String(r.id),
-      employeeId,
-      type: (r.type?.toString().toLowerCase().includes('sick')
-        ? 'sick'
-        : r.type?.toString().toLowerCase().includes('unpaid')
-          ? 'unpaid'
-          : 'annual') as LeaveType,
-      startDate: r.start,
-      endDate: r.end,
-      days: Number(r.amount?.amount ?? 0),
-      status: (status === 'approved'
-        ? 'approved'
-        : status === 'denied' || status === 'rejected'
-          ? 'rejected'
-          : status === 'cancelled'
-            ? 'cancelled'
-            : 'pending') as LeaveRecord['status'],
-      createdAt: r.start,
-    };
-  });
+  return requests
+    .map((r) => {
+      const type = classifyType(unwrap(r.type));
+      if (!type) return null;
+
+      return {
+        id: String(r.id),
+        employeeId,
+        type,
+        startDate: r.start,
+        endDate: r.end,
+        days: amountInDays(r.amount),
+        status: classifyStatus(unwrap(r.status, 'status')),
+        createdAt: r.start,
+      } satisfies LeaveRecord;
+    })
+    .filter((r): r is LeaveRecord => r !== null);
 }
 
 export class CheckLeaveBalanceTool implements LuaTool {
@@ -122,6 +152,7 @@ export class CheckLeaveBalanceTool implements LuaTool {
       employeeName: employee.displayName,
       country: rule.code,
       leaveType,
+      leaveYear: bal.period.label,
       entitlementDays: bal.entitlement,
       takenOrPendingDays: bal.reserved,
       remainingDays: bal.remaining,

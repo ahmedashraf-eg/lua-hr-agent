@@ -85,15 +85,52 @@ export function entitlements(
   };
 }
 
+export interface LeaveYear {
+  start: string;
+  end: string;
+  label: string;
+}
+
+/**
+ * The leave year a given date falls in.
+ *
+ * Calendar year, which is the common convention across the four operating
+ * countries and matches the carry-over rule in the leave policy (up to five
+ * days into the following year, to be taken by 31 March).
+ *
+ * This exists because entitlement is annual and leave records are not. An
+ * employee hired in 2019 has seven years of history in the HRIS; summing all
+ * of it against one year's entitlement reports everyone as having nothing
+ * left, which is both wrong and the kind of wrong that looks plausible.
+ */
+export function leaveYearOf(asOf: string = new Date().toISOString().slice(0, 10)): LeaveYear {
+  const year = asOf.slice(0, 4);
+  return { start: `${year}-01-01`, end: `${year}-12-31`, label: year };
+}
+
 /**
  * Days already committed for a leave type — approved plus pending.
  *
  * Pending requests reserve entitlement so two requests submitted in quick
  * succession cannot together overdraw the balance.
+ *
+ * Scoped to a leave year. A request is counted in the year it starts, so a
+ * period spanning New Year lands wholly in the year it began rather than
+ * being split — simpler to explain to an employee, and it matches how the
+ * request was approved.
  */
-export function reservedDays(records: LeaveRecord[], type: LeaveType): number {
+export function reservedDays(
+  records: LeaveRecord[],
+  type: LeaveType,
+  period?: LeaveYear,
+): number {
   return records
-    .filter((r) => r.type === type && (r.status === 'approved' || r.status === 'pending'))
+    .filter((r) => {
+      if (r.type !== type) return false;
+      if (r.status !== 'approved' && r.status !== 'pending') return false;
+      if (!period) return true;
+      return r.startDate >= period.start && r.startDate <= period.end;
+    })
     .reduce((sum, r) => sum + (r.days || 0), 0);
 }
 
@@ -103,10 +140,12 @@ export interface Balance {
   reserved: number;
   remaining: number;
   requiresApproval: boolean;
+  /** The leave year these numbers describe. */
+  period: LeaveYear;
   source: string;
 }
 
-/** Remaining balance for a leave type. */
+/** Remaining balance for a leave type, within the current leave year. */
 export function balance(
   country: string,
   hireDate: string,
@@ -117,7 +156,8 @@ export function balance(
   const ent = entitlements(country, hireDate, asOf);
   if (!ent) return null;
 
-  const reserved = reservedDays(records, type);
+  const period = leaveYearOf(asOf);
+  const reserved = reservedDays(records, type, period);
 
   if (type === 'unpaid') {
     // No statutory cap, but unpaid leave is never automatically granted.
@@ -127,6 +167,7 @@ export function balance(
       reserved,
       remaining: Infinity,
       requiresApproval: true,
+      period,
       source: ent.source,
     };
   }
@@ -139,6 +180,7 @@ export function balance(
     reserved,
     remaining: Math.max(0, entitlement - reserved),
     requiresApproval: false,
+    period,
     source: ent.source,
   };
 }
@@ -210,7 +252,10 @@ export function validateLeaveRequest(params: {
     }
   }
 
-  const bal = balance(params.country, params.hireDate, type, params.records, params.asOf);
+  // Checked against the leave year the request falls in, not today's. Leave
+  // booked for January is drawn from January's entitlement, so a request made
+  // in December for the new year does not fail against the old year's balance.
+  const bal = balance(params.country, params.hireDate, type, params.records, params.startDate);
   if (!bal) {
     return { ok: false, reason: 'unknown_country' };
   }

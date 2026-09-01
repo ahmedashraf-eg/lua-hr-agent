@@ -140,11 +140,11 @@ export class VerifyIdentityTool implements LuaTool {
       detail: explanation[auto.reason] ?? 'Automatic recognition was not possible.',
       attemptsRemaining: state.attemptsRemaining,
       needed: [
-        { field: 'employeeId', askEnglish: 'What is your employee ID?', askArabic: 'ما هو رقمك الوظيفي؟' },
-        { field: 'hireDate', askEnglish: 'What date did you start? (YYYY-MM-DD)', askArabic: 'ما تاريخ بدء عملك؟ (سنة-شهر-يوم)' },
+        { field: 'employeeId', ask: 'What is your employee ID?' },
+        { field: 'hireDate', ask: 'What date did you start? (YYYY-MM-DD)' },
       ],
       action:
-        'Ask for both, in their language, then call this tool again with them. Do not read anything from a personnel record until this succeeds.',
+        'Ask for both, translated into the language of THEIR last message, then call this tool again with them. Do not read anything from a personnel record until this succeeds.',
     };
   }
 }

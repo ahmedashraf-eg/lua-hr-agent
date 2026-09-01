@@ -69,14 +69,46 @@ export interface Employee {
   iqamaExpiry?: string | null;
 }
 
+/**
+ * A BambooHR time-off request as the API actually returns it.
+ *
+ * `status` and `type` are nested objects, not strings, and `amount.unit` is
+ * often "hours" rather than "days". Reading any of the three naively produces
+ * numbers that look plausible and are badly wrong — see `toLeaveRecord`.
+ */
 export interface TimeOffRequest {
-  id: string;
-  employeeId: string;
-  status: string;
+  id: string | number;
+  employeeId?: string | number;
+  status: string | { status?: string; lastChanged?: string };
   start: string;
   end: string;
-  type: string;
-  amount?: { unit: string; amount: string };
+  type: string | { id?: string | number; name?: string };
+  amount?: { unit?: string; amount?: string | number };
+}
+
+/** Unwrap a field BambooHR may return as either a string or an object. */
+export function unwrap(value: unknown, key = 'name'): string {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object') {
+    const nested = (value as Record<string, unknown>)[key];
+    if (typeof nested === 'string') return nested;
+  }
+  return '';
+}
+
+/**
+ * Convert an amount to days.
+ *
+ * BambooHR reports in hours for accounts configured that way, so 40 hours of
+ * leave reads as 40 days unless converted — an eightfold overcount against a
+ * 30-day entitlement.
+ */
+export function amountInDays(amount?: { unit?: string; amount?: string | number }): number {
+  if (!amount) return 0;
+  const value = Number(amount.amount ?? 0);
+  if (!Number.isFinite(value)) return 0;
+
+  return /hour/i.test(amount.unit ?? '') ? value / 8 : value;
 }
 
 export class BambooError extends Error {
@@ -212,9 +244,33 @@ export async function getEmployee(employeeId: string): Promise<Employee> {
   return mapEmployee({ ...raw, id: employeeId }, cfg);
 }
 
+/**
+ * Roster cache.
+ *
+ * Every authorization decision needs the caller's role and reporting line,
+ * which means the directory is read on every tool call — and at 108 employees
+ * through the custom-report endpoint that was the single most expensive thing
+ * in a turn, paid once per tool rather than once per turn.
+ *
+ * A short TTL keeps the property that mattered: a promotion or a team move
+ * still takes effect on its own, just within a minute rather than instantly.
+ * That is a better trade than re-reading a roster that changes weekly.
+ */
+const DIRECTORY_TTL_MS = 60_000;
+let directoryCache: { at: number; roster: Employee[] } | null = null;
+
+/** Drop the cached roster — call after a write that changes the directory. */
+export function invalidateDirectory(): void {
+  directoryCache = null;
+}
+
 /** Fetch the whole roster with Iqama custom fields. Used by the Iqama sweep. */
 export async function getDirectory(): Promise<Employee[]> {
   if (USE_MOCK) return MOCK_EMPLOYEES.map((e) => ({ ...e }));
+
+  if (directoryCache && Date.now() - directoryCache.at < DIRECTORY_TTL_MS) {
+    return directoryCache.roster;
+  }
 
   const cfg = config();
   try {
@@ -234,14 +290,18 @@ export async function getDirectory(): Promise<Employee[]> {
       },
     );
     if (report.employees && report.employees.length > 0) {
-      return report.employees.map((raw) => mapEmployee(raw, cfg));
+      const roster = report.employees.map((raw) => mapEmployee(raw, cfg));
+      directoryCache = { at: Date.now(), roster };
+      return roster;
     }
   } catch {
     // Fall back to standard directory if custom reports are restricted
   }
 
   const data = await request<{ employees?: Record<string, unknown>[] }>('/employees/directory');
-  return (data.employees ?? []).map((raw) => mapEmployee(raw, cfg));
+  const roster = (data.employees ?? []).map((raw) => mapEmployee(raw, cfg));
+  directoryCache = { at: Date.now(), roster };
+  return roster;
 }
 
 /**

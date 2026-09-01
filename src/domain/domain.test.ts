@@ -198,6 +198,32 @@ const pending: LeaveRecord[] = [{
 check('KSA senior balance is 30', balance('KSA', '2018-01-01', 'annual', noRecords, '2026-01-01')?.remaining, 30);
 check('pending days are reserved', balance('KSA', '2018-01-01', 'annual', pending, '2026-01-01')?.remaining, 20);
 
+/* --------------------------------------------- the leave year window */
+// Regression: reservedDays summed every record ever, so an employee with
+// years of history showed zero remaining against a 30-day entitlement.
+const priorYears: LeaveRecord[] = [
+  { id: 'lv-2019', employeeId: 'e1', type: 'annual', startDate: '2019-04-01', endDate: '2019-04-28', days: 28, status: 'approved', createdAt: '2019-03-01' },
+  { id: 'lv-2020', employeeId: 'e1', type: 'annual', startDate: '2020-04-01', endDate: '2020-04-28', days: 28, status: 'approved', createdAt: '2020-03-01' },
+  { id: 'lv-2026', employeeId: 'e1', type: 'annual', startDate: '2026-03-01', endDate: '2026-03-05', days: 5, status: 'approved', createdAt: '2026-02-01' },
+];
+
+check('earlier years do not count against this year',
+  balance('KSA', '2018-01-01', 'annual', priorYears, '2026-06-01')?.remaining, 25);
+check('this year’s leave does count',
+  balance('KSA', '2018-01-01', 'annual', priorYears, '2026-06-01')?.reserved, 5);
+check('the balance names the year it describes',
+  balance('KSA', '2018-01-01', 'annual', priorYears, '2026-06-01')?.period.label, '2026');
+check('a different year sees a different total',
+  balance('KSA', '2018-01-01', 'annual', priorYears, '2019-06-01')?.reserved, 28);
+
+// A request for next January is checked against next year's balance.
+check('leave booked into the new year uses the new year’s balance',
+  validateLeaveRequest({
+    country: 'KSA', hireDate: '2018-01-01', type: 'annual',
+    startDate: '2027-01-05', endDate: '2027-01-09',
+    records: priorYears, asOf: '2026-12-20',
+  }).ok, true);
+
 check(
   'request within balance is accepted',
   validateLeaveRequest({

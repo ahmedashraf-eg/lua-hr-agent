@@ -4,37 +4,37 @@ agent:
 skills:
   - name: hr-onboarding
     skillId: f921a286-ad60-4dfc-9a86-00f0dfbae779
-    version: 1.0.7
+    version: 1.0.13
   - name: hr-leave
     skillId: 754526df-955e-4e8e-8eb0-cd746c7cb611
-    version: 1.0.7
+    version: 1.0.13
   - name: hr-compliance
     skillId: 21c644e2-79a1-4a7a-b2ff-5bd7568e54d6
-    version: 1.0.7
+    version: 1.0.13
   - name: hr-setup
     skillId: 0e1081d7-cc96-4cc7-aa5e-83192f0a4e97
-    version: 1.0.7
+    version: 1.0.13
   - name: hr-requests
     skillId: 2675f952-9c25-4655-953e-3f92dc5625d1
-    version: 1.0.3
+    version: 1.0.9
   - name: hr-performance
     skillId: c8f2c984-e39a-42d1-a03d-ede82bf8e6a3
-    version: 1.0.3
+    version: 1.0.9
   - name: hr-identity
     skillId: dc712685-559b-4740-a92c-4df7d6eb3c45
-    version: 1.0.2
+    version: 1.0.8
 webhooks: []
 jobs:
   - jobId: 10eda07f-185d-411b-b53e-0ec62f71a878
     name: iqama-expiry-sweep
-    version: 1.0.7
+    version: 1.0.13
   - jobId: 04f415b0-e33e-43ae-8eda-82bfea268572
     name: daily-checkin-reminder
-    version: 1.0.3
+    version: 1.0.9
 preprocessors: []
 postprocessors: []
 mcpServers: []
 backup:
-  activeVersion: 7
-  lastHash: 90c48a316bf52ae6458d781f971f0f73dedb23a0db36b5851eb7170645b9bc79
-  lastPushedAt: '2026-08-31T18:13:05.427Z'
+  activeVersion: 13
+  lastHash: 178108feb9c0397034318cdc7169643e670c692f735d916ee95b76e95c4167b9
+  lastPushedAt: '2026-09-01T19:42:45.121Z'

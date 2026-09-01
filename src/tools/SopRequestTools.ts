@@ -106,13 +106,13 @@ export class SubmitSopRequestTool implements LuaTool {
         error: 'missing_details',
         detail: check.message,
         requestType: check.spec!.label,
-        needed: check.missing!.map((f) => ({
-          field: f.key,
-          askEnglish: f.prompt,
-          askArabic: f.promptAr,
-        })),
+        // English only. Handing the model both languages lets the tool decide
+        // what the employee reads, which is the persona's job — and in
+        // practice it picks whichever it saw last rather than whichever the
+        // employee wrote in.
+        needed: check.missing!.map((f) => ({ field: f.key, ask: f.prompt })),
         action:
-          'Ask the employee for the missing details, in their language, then call this tool again with them filled in. Do not invent values.',
+          'Ask the employee for these, translated into the language of THEIR last message, then call this tool again with them filled in. Do not invent values.',
       };
     }
 
